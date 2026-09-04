@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmkv-parser"
+version = "1.0.0"
+description = "Read-only reader for Tencent MMKV key-value store files, as vendored by the LEAPP tools"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Alexis Brignoni" }]
+
+[project.urls]
+Homepage = "https://github.com/abrignoni/mmkv-parser"
+
+[project.scripts]
+mmkv-parser = "mmkv_parser.__main__:main"
+
+[tool.setuptools]
+packages = ["mmkv_parser"]
