@@ -3,6 +3,7 @@
 The store fixtures are hand-built to the on-disk layout, the same way
 test_mmkv_parser.py builds its own, so this file carries no sample data.
 """
+import os
 import pathlib
 import struct
 import subprocess
@@ -114,6 +115,37 @@ class DumpCommandTest(unittest.TestCase):
     def test_dump_needs_a_store_argument(self):
         result = self._run('dump')
         self.assertEqual(result.returncode, 2)
+
+    def test_tabs_and_newlines_in_keys_and_values_stay_on_one_line(self):
+        """Keys and strings print as literals, so the only raw tabs are the separators."""
+        path = self._write(_store(
+            _entry('note', _string_value('first\tsecond\nthird')),
+            _entry('odd\tkey', _string_value('x')),
+            _entry('blob', b'\x01\t\n\x00raw'),
+        ))
+        result = self._run('dump', path)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines, [
+            "0\t'note'\t'first\\tsecond\\nthird'",
+            "1\t'odd\\tkey'\t'x'",
+            "2\t'blob'\tb'\\x01\\t\\n\\x00raw'",
+        ])
+        self.assertTrue(all(line.count('\t') == 2 for line in lines))
+
+    def test_pipe_closed_before_anything_is_written_exits_quietly(self):
+        """Small output sits in the buffer until exit; the flush must not traceback."""
+        path = self._write(_store(_entry('k', _string_value('v'))))
+        read_end, write_end = os.pipe()
+        os.close(read_end)                        # nobody will ever read
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'mmkv_parser', 'dump', path],
+                cwd=str(REPO_ROOT), stdout=write_end, stderr=subprocess.PIPE,
+                text=True, check=False)
+        finally:
+            os.close(write_end)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
 
     def test_closed_pipe_is_not_reported_as_a_store_error(self):
         """`dump big-store | head -1` must exit quietly: no message, no traceback."""

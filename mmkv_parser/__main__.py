@@ -64,6 +64,9 @@ def main(argv=None):
 
     try:
         dump(args.store, live=args.live)
+        # Flush here so a closed pipe surfaces inside this handler rather than
+        # in the flush Python runs at exit, which cannot be caught.
+        sys.stdout.flush()
     except MMKVError as exc:
         print(f'{args.store}: {exc}', file=sys.stderr)
         return 1
