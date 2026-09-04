@@ -16,6 +16,7 @@ An encrypted store (a non-zero AES vector in the sibling ``.crc`` file) is
 refused with the reader's own MMKVError. Nothing here decrypts.
 """
 import argparse
+import os
 import sys
 
 from . import MMKVError, decode_value, read_entries
@@ -66,6 +67,12 @@ def main(argv=None):
     except MMKVError as exc:
         print(f'{args.store}: {exc}', file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # Whatever was reading stdout closed it (head, grep -m, a pager). Exit
+        # quietly, with stdout pointed at the null device so the flush Python
+        # runs at exit does not complain about the closed pipe.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except OSError as exc:
         print(f'{args.store}: {exc.strerror or exc}', file=sys.stderr)
         return 1

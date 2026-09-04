@@ -115,6 +115,17 @@ class DumpCommandTest(unittest.TestCase):
         result = self._run('dump')
         self.assertEqual(result.returncode, 2)
 
+    def test_closed_pipe_is_not_reported_as_a_store_error(self):
+        """`dump big-store | head -1` must exit quietly: no message, no traceback."""
+        path = self._write(_store(*(
+            _entry(f'key{index:05d}', _string_value('v' * 40)) for index in range(3000))))
+        result = subprocess.run(
+            f'"{sys.executable}" -m mmkv_parser dump "{path}" | head -1',
+            shell=True, cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        self.assertEqual(result.stdout.splitlines(), ["0\t'key00000'\t'" + 'v' * 40 + "'"])
+
 
 if __name__ == '__main__':
     unittest.main()
