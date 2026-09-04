@@ -112,6 +112,74 @@ class DumpCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn('Traceback', result.stderr)
 
+    def _encrypted(self):
+        """An encrypted store built with a backend, or None when none is installed."""
+        try:
+            from Crypto.Cipher import AES  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            return None, None
+        from mmkv_parser import _key_material  # pylint: disable=import-outside-toplevel
+        region = _varint(len(_entry('a', _string_value('b')))) + _entry('a', _string_value('b'))
+        vector = b'\x02' * 16
+        cipher = AES.new(_key_material(b'secret'), AES.MODE_CFB, vector,
+                         segment_size=128).encrypt(region)
+        meta = bytearray(32)
+        struct.pack_into('<I', meta, 4, 4)
+        meta[12:28] = vector
+        struct.pack_into('<I', meta, 28, len(cipher))
+        return self._write(struct.pack('<I', len(cipher)) + cipher + b'\x00' * 32,
+                           crc=bytes(meta)), b'secret'
+
+    def test_a_key_reads_an_encrypted_store_and_is_never_printed(self):
+        path, key = self._encrypted()
+        if path is None:
+            self.skipTest('no crypto backend installed')
+        result = self._run('dump', '--key', key.decode(), path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0\t'a'\t'b'"])
+        self.assertNotIn('secret', result.stdout + result.stderr)
+
+    def test_a_hex_key_reads_the_same_store(self):
+        path, key = self._encrypted()
+        if path is None:
+            self.skipTest('no crypto backend installed')
+        result = self._run('dump', '--key-hex', key.hex(), path)
+        self.assertEqual(result.stdout.splitlines(), ["0\t'a'\t'b'"])
+
+    def test_a_wrong_key_exits_with_a_message_and_no_rows(self):
+        path, _ = self._encrypted()
+        if path is None:
+            self.skipTest('no crypto backend installed')
+        result = self._run('dump', '--key', 'wrong', path)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('did not decrypt', result.stderr)
+
+    def test_malformed_hex_is_rejected_before_anything_is_read(self):
+        result = self._run('dump', '--key-hex', 'zz', self._write(_store(_entry('a', b''))))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('not valid hex', result.stderr)
+
+    def test_the_two_key_options_are_mutually_exclusive(self):
+        result = self._run('dump', '--key', 'a', '--key-hex', '00', 'x')
+        self.assertEqual(result.returncode, 2)
+
+    def test_a_size_disagreement_is_noted_on_stderr_without_touching_the_rows(self):
+        """The header says one thing and the .crc file another; the rows come from the .crc."""
+        region = _varint(len(_entry('k', _string_value('v')))) + _entry('k', _string_value('v'))
+        meta = bytearray(32)
+        struct.pack_into('<I', meta, 4, 4)
+        struct.pack_into('<I', meta, 28, len(region))
+        path = self._write(struct.pack('<I', 0) + region + b'\x00' * 32, crc=bytes(meta))
+        result = self._run('dump', path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0\t'k'\t'v'"])
+        self.assertIn('the .crc file records', result.stderr)
+
+    def test_no_note_when_the_two_sizes_agree(self):
+        result = self._run('dump', self._write(_store(_entry('a', _string_value('b')))))
+        self.assertEqual(result.stderr, '')
+
     def test_dump_needs_a_store_argument(self):
         result = self._run('dump')
         self.assertEqual(result.returncode, 2)

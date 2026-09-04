@@ -13,13 +13,21 @@ quoted, integers are bare, a removal marker prints as ``<removed>``, and a
 container that decodes as neither prints as a bytes literal.
 
 An encrypted store (a non-zero AES vector in the sibling ``.crc`` file) is
-refused with the reader's own MMKVError. Nothing here decrypts.
+refused unless a key is supplied with ``--key`` or ``--key-hex``. The key is
+never printed and never looked for; a key that does not decrypt the store is
+reported as such rather than dumping garbage.
+
+When the four-byte header and the ``.crc`` file disagree about the length of the
+data region, a note goes to stderr saying which one was read, so a store written
+by a release that no longer maintains the header cannot quietly read short.
 """
 import argparse
+import binascii
 import os
+import struct
 import sys
 
-from . import MMKVError, decode_value, read_entries
+from . import MMKVError, _read_meta, decode_value, read_entries
 
 
 def _render(value):
@@ -30,9 +38,33 @@ def _render(value):
     return str(value)
 
 
-def dump(path, live=False, out=sys.stdout):
+def size_note(path):
+    """Return a note when the header and the .crc file disagree about the region size.
+
+    They agreed on every store measured across 55 extractions, so this is silent in
+    practice; it fires on a store whose header was left behind by a release that
+    stopped maintaining it.
+    """
+    meta = _read_meta(path)
+    if not meta or meta['actual_size'] is None or meta['version'] < 3:
+        return None
+    try:
+        with open(path, 'rb') as handle:
+            header = struct.unpack('<I', handle.read(4))[0]
+    except (OSError, struct.error):
+        return None
+    if header == meta['actual_size']:
+        return None
+    return (f'note: the header records {header} bytes and the .crc file records '
+            f"{meta['actual_size']}; reading the .crc value, which is the one MMKV uses")
+
+
+def dump(path, live=False, key=None, aes256=False, out=sys.stdout):
     """Print the entries of the store at ``path``; see the module docstring."""
-    entries = read_entries(path)
+    note = size_note(path)
+    if note:
+        print(note, file=sys.stderr)
+    entries = read_entries(path, key=key, aes256=aes256)
     if live:
         latest = {}
         for index, (key, container) in enumerate(entries):
@@ -60,10 +92,29 @@ def main(argv=None):
     dump_parser.add_argument(
         '--live', action='store_true',
         help='print only the last write of each key and drop removed keys')
+    key_group = dump_parser.add_mutually_exclusive_group()
+    key_group.add_argument(
+        '--key', metavar='TEXT',
+        help='decrypt with this key, taken as UTF-8 text; nothing is looked for, and '
+             'the key is never printed')
+    key_group.add_argument(
+        '--key-hex', metavar='HEX', dest='key_hex',
+        help='decrypt with this key, given as hex, for a key that is not text')
+    dump_parser.add_argument(
+        '--aes256', action='store_true',
+        help='the store was created with AES-256; the MMKV default is AES-128')
     args = parser.parse_args(argv)
 
+    key = args.key
+    if args.key_hex:
+        try:
+            key = binascii.unhexlify(args.key_hex.replace(' ', ''))
+        except (binascii.Error, ValueError):
+            print('--key-hex is not valid hex', file=sys.stderr)
+            return 2
+
     try:
-        dump(args.store, live=args.live)
+        dump(args.store, live=args.live, key=key, aes256=args.aes256)
         # Flush here so a closed pipe surfaces inside this handler rather than
         # in the flush Python runs at exit, which cannot be caught.
         sys.stdout.flush()

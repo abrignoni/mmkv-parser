@@ -27,12 +27,14 @@ up in extractions, most often under the library's default instance name
 
 ## What it does not do
 
-- Decrypt. A store whose `.crc` meta file carries a non-zero AES vector is
-  refused with `MMKVError` instead of being walked, because walking ciphertext
-  returns garbage keys that look like data.
-- Verify the CRC, or read the meta file's own copy of the size. The walk is
-  bounded by the size in the first four bytes of the data file. The format
-  section says why that holds and where it stops holding.
+- Look for a key. Decryption happens only when you pass one. A store whose
+  `.crc` meta file carries a non-zero AES vector and no key is refused with
+  `MMKVError` instead of being walked, because walking ciphertext returns
+  garbage keys that look like data. A key that does not decrypt the store is
+  refused the same way rather than returning a partial garbage read.
+- Verify the CRC. The meta file records one over the data region as stored, so
+  it validates the file rather than the key; the format section gives the field
+  for an examiner who wants to check it.
 - Type values. MMKV records a value's type in the calling code, not in the
   file. One consequence worth knowing: the empty string, the integer 0 and
   `false` are all the single byte `00`, and `decode_value` returns `''` for it.
@@ -50,21 +52,34 @@ or copy `mmkv_parser/__init__.py` next to your code. It is one file.
 
     read_dict('mmkv.default')    # last write of each key, removed keys omitted
 
-`read_entries` raises `MMKVError` for a file that is not a readable store,
-including an encrypted one. `decode_value` returns a `str`, an `int`, `None`
-for a removal marker, or the raw `bytes` when neither reading applies. The
-public API is those four names and nothing else changes without a version bump.
+    read_dict('store', key='the key the app uses')   # an encrypted store
+    read_dict('store', key=b'\x00...', aes256=True)  # created with AES-256
+
+`read_entries` raises `MMKVError` for a file that is not a readable store, for
+an encrypted one with no key, and for a key that does not decrypt it. A key is
+ignored for a store that is not encrypted. `decode_value` returns a `str`, an
+`int`, `None` for a removal marker, or the raw `bytes` when neither reading
+applies. The public API is those four names, and the `key` and `aes256`
+arguments are optional, so code written against 1.0 keeps working.
+
+Decryption needs `pycryptodome` or `cryptography` importable. Neither is a
+dependency: everything else works with nothing installed, which is what lets the
+LEAPP cores carry the reader as a single file.
 
 From the command line:
 
     python -m mmkv_parser dump path/to/store           # every write, in file order
     python -m mmkv_parser dump --live path/to/store    # last write per key, removed keys dropped
+    python -m mmkv_parser dump --key 'the key' store   # an encrypted store
+    python -m mmkv_parser dump --key-hex 0011.. store  # a key that is not text
 
 Each line is the write index (the entry's position in the file, counting from
 0), the key, and the decoded value, tab separated. Keys and strings are quoted
 Python literals, so an empty string, a number, and a string that looks like a
 number stay distinguishable; a removal prints as `<removed>`. An encrypted store
-exits with status 1 and the reader's own message on stderr.
+exits with status 1 and the reader's own message on stderr. The key is never
+printed. When the header and the `.crc` file disagree about the length of the
+data region, a note on stderr says which was read.
 
 ## The format
 
@@ -97,10 +112,14 @@ through v2.3.0 wrote the leading field on every write
 ([v2.3.0 MMKV_IO.cpp](https://github.com/Tencent/MMKV/blob/381b96926b73f7394d9fd0905d2753bd5205ff59/Core/MMKV_IO.cpp#L529-L530)); v2.4.0 gates that write behind meta
 version below 3 ([v2.4.0 MMKV_IO.cpp](https://github.com/Tencent/MMKV/blob/23d652c17e8c2023bb50f1c92e862a2304eaa2a2/Core/MMKV_IO.cpp#L574-L575), unchanged at
 [master](https://github.com/Tencent/MMKV/blob/ad7657ef9d120dbcdd7432d75aa6c59391149b22/Core/MMKV_IO.cpp#L629-L630)). Measured on 54 stores whose meta file is at
-version 3 or 4 and records a size, from 26 iOS and Android extractions,
-the leading field and the meta file's size agreed on all 54. A store written
-only by v2.4.0 or later could differ; for those the meta file's `actualSize`
-field (offset 28) is the value MMKV itself reads.
+version 3 or 4 and records a size, from 26 iOS and Android extractions, the
+leading field and the meta file's size agreed on all 54; a later sweep of every
+registered extraction put that at 875 of 875, with no disagreement anywhere. A
+store written only by v2.4.0 or later could differ, so this reader takes the meta
+file's `actualSize` field (offset 28) when the meta version is 3 or higher and
+the value fits inside the file, which is the rule `MMKV::readActualSize` follows,
+and falls back to the header otherwise. On every store measured to date the two
+give the same bytes.
 
 **The items-size varint.** The data region opens with one varint holding the
 size of the items that follow. How wide it is on disk depends on which release
@@ -171,8 +190,20 @@ compute it; the field is documented here so an examiner can.
 **Encryption.** MMKV encrypts with AES CFB-128 or CFB-256, chosen over CBC
 because the store is append-only ([FAQ wiki](https://github.com/Tencent/MMKV/wiki/FAQ/f008c42c66eaf99c618c91ab5b74396de8f01159)); the IV lives in the
 meta file ([MMKVPredef.h](https://github.com/Tencent/MMKV/blob/ad7657ef9d120dbcdd7432d75aa6c59391149b22/Core/MMKVPredef.h#L265) for the length). A non-zero vector at
-bytes 12 to 28 is how the reader recognises an encrypted store and refuses it.
-The key is not in either file, so nothing here decrypts.
+bytes 12 to 28 is how the reader recognises an encrypted store. The key is in
+neither file, so it has to be supplied; it is then taken the way `AESCrypt` takes
+it, truncated to sixteen bytes for AES-128 or thirty-two for AES-256 and
+zero-padded if shorter, which means two keys sharing their first sixteen bytes
+are one key.
+
+**How a wrong key is caught.** The CRC in the meta file is computed over the data
+region as stored, so it validates the file without saying anything about the key.
+A structural check does that instead: across 846 readable stores from 55
+extractions, a walk consumed the data region to its last byte every single time,
+with nothing left over. So a decryption that leaves a tail unread, or that yields
+no entries, did not produce an MMKV store, and the reader raises instead of
+returning what it managed to read. A plaintext store keeps the gentler behaviour
+of returning what was read before the walk lost alignment.
 
 ## Vendoring into the LEAPP cores
 
@@ -188,14 +219,25 @@ core's copy, and update the banner's commit line.
 
     python -m unittest discover -s tests -v
 
-`tests/test_mmkv_parser.py` holds the twelve known-answer tests, against byte
-fixtures built by hand to the on-disk layout: every items-size width,
+`tests/test_mmkv_parser.py` holds the twelve known-answer tests for the reader
+itself, against byte fixtures built by hand to the on-disk layout: every items-size width,
 superseded writes, removals, a scalar wider than 32 bits, the recorded size
 bounding the walk, a truncated walk, and the encrypted-store refusal. They fail
 against a reader that assumes a fixed 8-byte header, which is the control they
-were written for. `tests/test_cli.py` runs the command line end to end. Nothing
-under `tests/` comes from an extraction, and the same test file ships in each
-core as its own guard.
+were written for. `tests/test_cli.py` runs the command line end to end.
+
+`tests/test_encrypted_and_sizes.py` covers the other two. It asserts the
+published CFB128-AES128 vector from NIST SP 800-38A F.3.13 as a literal before
+anything is built on it, because pycryptodome's `MODE_CFB` defaults to 8-bit
+segments and silently returns something other than what MMKV wrote. Where both
+backends are installed the encrypted fixture is built with the one the reader
+will not use, so the bytes under test are not produced by the code under test.
+CI installs both backends and fails the job if any test reports as skipped, then
+runs the reader's own suite again with neither installed to prove it needs
+nothing.
+
+Nothing under `tests/` comes from an extraction, and the reader's own test file
+ships in each core as its own guard.
 
 ## Sources
 

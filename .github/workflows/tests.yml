@@ -27,8 +27,27 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The reader needs nothing to run. Decryption needs one of these, and a test
+      # that skips for a missing backend is indistinguishable from a passing one in
+      # the summary, so both are installed here and a skip fails the job below.
+      - name: Install the crypto backends the decryption tests need
+        run: python -m pip install pycryptodome cryptography
+
       - name: Run the known-answer tests
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
+          if grep -qi "skipped" test-output.txt; then
+            echo "::error::a test was skipped; every test must run on every version"
+            exit 1
+          fi
+
+      # Proves the reader itself has no dependencies: the same suite minus the
+      # decryption tests must pass in an environment with neither backend.
+      - name: Run without any crypto backend installed
+        run: |
+          python -m pip uninstall -y pycryptodome cryptography
+          python -m unittest discover -s tests -p 'test_mmkv_parser.py' -v
 
       - name: Install the package and run the console script
         run: |
