@@ -16,10 +16,12 @@ string that looks like a number, and a number stay distinguishable: strings are
 quoted, integers are bare, a removal marker prints as ``<removed>``, and a
 container that decodes as neither prints as a bytes literal.
 
-An encrypted store (a non-zero AES vector in the sibling ``.crc`` file) is
-refused unless a key is supplied with ``--key`` or ``--key-hex``. The key is
-never printed and never looked for; a key that does not decrypt the store is
-reported as such rather than dumping garbage.
+A store whose data region does not read as plaintext MMKV records, and whose
+sibling ``.crc`` file carries an AES vector, is refused unless a key is supplied
+with ``--key`` or ``--key-hex``. The vector alone does not mean a store is
+encrypted, since ``MMKV::clearAll`` writes one for plaintext stores too, so the
+region is read to decide. The key is never printed and never looked for; a key
+that does not decrypt the store is reported as such rather than dumping garbage.
 
 ``--recover`` applies to a store whose recorded size is zero, the state MMKV leaves
 behind when it clears a store or fails its CRC: the records are still in the file. It

@@ -160,13 +160,25 @@ class CarveTest(unittest.TestCase):
         with mock.patch('mmkv_parser._CARVE_KEY', re.compile(r'^[0-9\w \-\$\./]+$')):
             self.assertGreater(len(carve_slack(path)), 100)
 
-    def test_an_encrypted_store_is_refused(self):
-        holder = b'\xff\xff\xff\x07'
-        region = holder + _entry('alpha', _string_value('AAA'))
-        crc = b'\x00' * 12 + b'\x11' * 16 + b'\x00' * 4
-        path = self._write(struct.pack('<I', len(region)) + region + b'\x01' * 64, crc=crc)
+    def test_a_store_whose_region_does_not_read_is_refused(self):
+        """Ciphertext or damage. Decided by reading the region, not by the meta vector.
+
+        The space past a region that does not read is not readable either, so carving
+        it would report noise as records.
+        """
+        region = bytes(range(120, 256)) * 3
+        path = self._write(struct.pack('<I', len(region)) + region + b'\x01' * 64)
         with self.assertRaises(MMKVError):
             carve_slack(path)
+
+    def test_a_cleared_plaintext_store_carves_despite_its_vector(self):
+        """clearAll writes a vector for plaintext stores too, and a cleared store is
+        exactly the one worth carving, so the vector must not stop it."""
+        alpha = _entry('alpha', _string_value('AAA'))
+        gamma = _entry('gamma', _string_value('CCC'))
+        crc = b'\x00' * 12 + b'\x11' * 16 + b'\x00' * 4
+        path = self._write(self._compacted([alpha, gamma], [alpha]), crc=crc)
+        self.assertTrue(any(record.key == 'gamma' for record in carve_slack(path)))
 
 
     def test_the_cli_prints_the_offset_the_flag_and_a_caveat(self):

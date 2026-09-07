@@ -196,7 +196,51 @@ class EncryptedStoreTest(unittest.TestCase):
         path = self._encrypted_store()
         with self.assertRaises(MMKVError) as caught:
             read_entries(path)
-        self.assertIn('AES-encrypted', str(caught.exception))
+        self.assertIn('encrypted or damaged', str(caught.exception))
+
+    @unittest.skipUnless(BACKENDS, 'no crypto backend installed')
+    def test_ciphertext_never_accounts_for_itself_as_plaintext_records(self):
+        """The control behind reading the region instead of the meta file's vector.
+
+        The reader calls a region plaintext when its records account for every byte of
+        the recorded size. That is only safe if ciphertext does not do so by accident.
+        Fixed keys and vectors, so this is a pinned result and not a sampling.
+        """
+        region = _region(_entry('channel', _string_value('googleplay')),
+                         _entry('version', _varint(33)),
+                         _entry('installer', _string_value('com.android.vending')))
+        clean = 0
+        for seed in range(200):
+            key = _key_material(b'k%d' % seed)
+            vector = bytes(((seed * 7 + i * 31) % 256) for i in range(16))
+            cipher = fixture_encrypt(region, key, vector)
+            path = self._write(struct.pack('<I', len(cipher)) + cipher,
+                               _meta(version=4, vector=vector, actual_size=len(cipher)))
+            try:
+                read_entries(path)
+                clean += 1
+            except MMKVError:
+                pass
+        self.assertEqual(clean, 0)
+
+    @unittest.skipUnless(BACKENDS, 'no crypto backend installed')
+    def test_recover_returns_nothing_for_a_reset_store_that_is_encrypted(self):
+        """Ciphertext does not walk, so the content test excludes it with no vector check."""
+        region = _region(_entry('channel', _string_value('googleplay')))
+        vector = b'\x01' * 16
+        cipher = fixture_encrypt(region, _key_material(self.KEY), vector)
+        path = self._write(struct.pack('<I', 0) + cipher + b'\x00' * 64,
+                           _meta(version=4, vector=vector, actual_size=0))
+        self.assertEqual(read_entries(path, recover=True), [])
+
+    def test_a_cleared_plaintext_store_is_not_mistaken_for_ciphertext(self):
+        """clearAll writes a vector for plaintext stores too; the region decides."""
+        region = _region(_entry('channel', _string_value('googleplay')))
+        path = self._write(struct.pack('<I', len(region)) + region,
+                           _meta(version=4, vector=b'\x9c' * 16, actual_size=len(region)))
+        self.assertEqual(read_dict(path), {'channel': 'googleplay'})
+        # and a key handed to it is ignored, as for any store that is not encrypted
+        self.assertEqual(read_dict(path, key=self.KEY), {'channel': 'googleplay'})
 
     @unittest.skipUnless(BACKENDS, 'no crypto backend installed')
     def test_a_wrong_key_is_refused_rather_than_returning_a_partial_read(self):
@@ -258,8 +302,8 @@ class RegionSizeTest(unittest.TestCase):
                      _entry('beta', _string_value('two')))
     BOTH = {'alpha': 'one', 'beta': 'two'}
 
-    def _store(self, header_size, meta):
-        payload = struct.pack('<I', header_size) + self.REGION + b'\x00' * 64
+    def _store(self, header_size, meta, region=None):
+        payload = struct.pack('<I', header_size) + (self.REGION if region is None else region) + b'\x00' * 64
         handle = tempfile.NamedTemporaryFile(suffix='.mmkv', delete=False)
         handle.write(payload)
         handle.close()
@@ -299,12 +343,21 @@ class RegionSizeTest(unittest.TestCase):
         path = self._store(header_size=len(self.REGION), meta=_meta(version=4, length=28))
         self.assertEqual(read_dict(path), self.BOTH)
 
+    @unittest.skipUnless(BACKENDS, 'no crypto backend installed')
     def test_a_short_meta_still_reports_an_encrypted_store(self):
-        path = self._store(header_size=len(self.REGION),
-                           meta=_meta(version=2, vector=bytes(range(1, 17)), length=28))
+        """The vector is read from a short meta so a real encrypted store is still refused."""
+        vector = bytes(range(1, 17))
+        cipher = fixture_encrypt(self.REGION, _key_material(b'a-key-for-testing'), vector)
+        path = self._store(region=cipher, header_size=len(cipher),
+                           meta=_meta(version=2, vector=vector, length=28))
         with self.assertRaises(MMKVError) as caught:
             read_entries(path)
-        self.assertIn('AES-encrypted', str(caught.exception))
+        self.assertIn('encrypted or damaged', str(caught.exception))
+
+    def test_a_short_meta_with_a_vector_does_not_refuse_a_plaintext_store(self):
+        path = self._store(header_size=len(self.REGION),
+                           meta=_meta(version=2, vector=bytes(range(1, 17)), length=28))
+        self.assertEqual(read_dict(path), self.BOTH)
 
     def test_no_meta_file_at_all_leaves_the_header_in_charge(self):
         path = self._store(header_size=len(self.REGION), meta=None)

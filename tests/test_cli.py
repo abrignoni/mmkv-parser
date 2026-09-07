@@ -98,14 +98,27 @@ class DumpCommandTest(unittest.TestCase):
         result = self._run('dump', '--live', path)
         self.assertEqual(result.stdout.splitlines(), ["2\t'flag'\t7"])
 
-    def test_encrypted_store_is_refused_with_the_readers_error(self):
+    def test_unreadable_store_with_a_vector_is_refused_with_the_readers_error(self):
+        region = bytes(range(120, 256)) * 3
         meta = bytearray(32)
         meta[12:28] = bytes(range(1, 17))
-        path = self._write(_store(_entry('a', _string_value('b'))), crc=bytes(meta))
+        struct.pack_into('<I', meta, 4, 4)
+        struct.pack_into('<I', meta, 28, len(region))
+        path = self._write(struct.pack('<I', len(region)) + region, crc=bytes(meta))
         result = self._run('dump', path)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, '')
-        self.assertIn('AES-encrypted', result.stderr)
+        self.assertIn('encrypted or damaged', result.stderr)
+
+    def test_a_cleared_plaintext_store_is_dumped_not_refused(self):
+        payload = _store(_entry('a', _string_value('b')))
+        meta = bytearray(32)
+        meta[12:28] = bytes(range(1, 17))
+        struct.pack_into('<I', meta, 4, 4)
+        struct.pack_into('<I', meta, 28, struct.unpack_from('<I', payload, 0)[0])
+        result = self._run('dump', self._write(payload, crc=bytes(meta)))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ["0\t'a'\t'b'"])
 
     def test_missing_file_is_an_error_not_a_traceback(self):
         result = self._run('dump', str(REPO_ROOT / 'tests' / 'does-not-exist.mmkv'))
