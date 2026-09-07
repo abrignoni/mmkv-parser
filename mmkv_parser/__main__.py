@@ -1,5 +1,9 @@
 """Command line entry point: ``python -m mmkv_parser dump <store>``.
 
+``carve <store>`` reads the space past the recorded data region instead. Those
+results are inferences and some are wrong; the caveat is printed to stderr on
+every run and the reasoning is in ``carve_slack``.
+
 Prints one line per entry in file order, tab separated: the write index (the
 entry's position in the file, counting from 0), the key, and the decoded value.
 Every entry is printed by default, so a key that was written more than once
@@ -32,7 +36,7 @@ import os
 import struct
 import sys
 
-from . import MMKVError, _read_meta, decode_value, read_entries
+from . import MMKVError, _read_meta, carve_slack, decode_value, read_entries
 
 
 def _render(value):
@@ -84,6 +88,21 @@ def dump(path, live=False, key=None, aes256=False, recover=False, out=sys.stdout
         print(f'{index}\t{key!r}\t{_render(decode_value(container))}', file=out)
 
 
+def carve(path, out=sys.stdout):
+    """Print the records carved from the space past the recorded region.
+
+    One line per record, tab separated: the record's offset in the file, whether its
+    key also exists live in the same store, the key, and the decoded value.
+    """
+    print('note: carved records are inferences drawn from unallocated space, not parsed '
+          'records, and some are wrong; a key marked live-key is corroborated by the '
+          'live region, and values holding base64 or hex carve dirty', file=sys.stderr)
+    for record in carve_slack(path):
+        flag = 'live-key' if record.live_key else '-'
+        print(f'{record.offset}\t{flag}\t{record.key!r}\t{_render(decode_value(record.container))}',
+              file=out)
+
+
 def main(argv=None):
     """Parse arguments and run; returns the process exit status."""
     parser = argparse.ArgumentParser(
@@ -112,10 +131,14 @@ def main(argv=None):
     dump_parser.add_argument(
         '--aes256', action='store_true',
         help='the store was created with AES-256; the MMKV default is AES-128')
+    carve_parser = commands.add_parser(
+        'carve', help='print records recovered from the space past the recorded region')
+    carve_parser.add_argument(
+        'store', help='path to the MMKV file; its .crc sibling is read when present')
     args = parser.parse_args(argv)
 
-    key = args.key
-    if args.key_hex:
+    key = getattr(args, 'key', None)
+    if getattr(args, 'key_hex', None):
         try:
             key = binascii.unhexlify(args.key_hex.replace(' ', ''))
         except (binascii.Error, ValueError):
@@ -123,8 +146,11 @@ def main(argv=None):
             return 2
 
     try:
-        dump(args.store, live=args.live, key=key, aes256=args.aes256,
-             recover=args.recover)
+        if args.command == 'carve':
+            carve(args.store)
+        else:
+            dump(args.store, live=args.live, key=key, aes256=args.aes256,
+                 recover=args.recover)
         # Flush here so a closed pipe surfaces inside this handler rather than
         # in the flush Python runs at exit, which cannot be caught.
         sys.stdout.flush()
