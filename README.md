@@ -19,6 +19,10 @@ up in extractions, most often under the library's default instance name
   is part of the evidence.
 - The collapsed view the app itself sees: the last write of each key, with
   removed keys dropped.
+- The records of a store whose recorded size is zero, on request. Clearing a
+  store, and failing its CRC on load, both write a size of zero into the meta
+  file and leave the records in place, so the store reads as empty while its
+  contents are still on disk. `recover=True` walks the surviving region.
 - The two encodings that can be told apart from the bytes alone. A container
   that is exactly a length prefix followed by that many bytes is how MMKV
   writes a string; anything else is read as a varint scalar, which covers the
@@ -35,6 +39,10 @@ up in extractions, most often under the library's default instance name
 - Verify the CRC. The meta file records one over the data region as stored, so
   it validates the file rather than the key; the format section gives the field
   for an examiner who wants to check it.
+- Carve. `recover` reads a region that is intact and unaccounted for, and it
+  returns nothing unless the walk consumes whole entries and then meets nothing
+  but the file's zero padding. It scans no offsets and infers no records, so a
+  region holding the leftovers of a rewrite is left alone rather than guessed at.
 - Type values. MMKV records a value's type in the calling code, not in the
   file. One consequence worth knowing: the empty string, the integer 0 and
   `false` are all the single byte `00`, and `decode_value` returns `''` for it.
@@ -204,6 +212,18 @@ with nothing left over. So a decryption that leaves a tail unread, or that yield
 no entries, did not produce an MMKV store, and the reader raises instead of
 returning what it managed to read. A plaintext store keeps the gentler behaviour
 of returning what was read before the walk lost alignment.
+
+**A recorded size of zero is not an empty store.** `MMKV::clearAll` truncates the
+file to the expected capacity and calls `writeActualSize(0, 0, ...)`; the load
+path's "file not valid or empty, discard everything" branch does the same when a
+store fails its CRC. Neither zeroes the records, and growth is the only thing that
+zero-fills, so what sits past the recorded size is the store's own former content
+and never another file's. Such a store reads as empty by default, which is what
+the app sees. `recover=True` walks the region and returns the entries only when
+they account for the whole of it, ending in the zero padding. Measured on 16 such
+stores from one iOS extraction, every one walked to clean padding, recovering 1 to
+46 entries each, 126 in total; on the same extraction the default output of all 94
+stores was unchanged.
 
 ## Vendoring into the LEAPP cores
 

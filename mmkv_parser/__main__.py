@@ -17,6 +17,11 @@ refused unless a key is supplied with ``--key`` or ``--key-hex``. The key is
 never printed and never looked for; a key that does not decrypt the store is
 reported as such rather than dumping garbage.
 
+``--recover`` applies to a store whose recorded size is zero, the state MMKV leaves
+behind when it clears a store or fails its CRC: the records are still in the file. It
+walks the surviving region and prints what it finds, and prints nothing when the region
+does not walk cleanly to its zero padding.
+
 When the four-byte header and the ``.crc`` file disagree about the length of the
 data region, a note goes to stderr saying which one was read, so a store written
 by a release that no longer maintains the header cannot quietly read short.
@@ -59,12 +64,12 @@ def size_note(path):
             f"{meta['actual_size']}; reading the .crc value, which is the one MMKV uses")
 
 
-def dump(path, live=False, key=None, aes256=False, out=sys.stdout):
+def dump(path, live=False, key=None, aes256=False, recover=False, out=sys.stdout):
     """Print the entries of the store at ``path``; see the module docstring."""
     note = size_note(path)
     if note:
         print(note, file=sys.stderr)
-    entries = read_entries(path, key=key, aes256=aes256)
+    entries = read_entries(path, key=key, aes256=aes256, recover=recover)
     if live:
         latest = {}
         for index, (key, container) in enumerate(entries):
@@ -101,6 +106,10 @@ def main(argv=None):
         '--key-hex', metavar='HEX', dest='key_hex',
         help='decrypt with this key, given as hex, for a key that is not text')
     dump_parser.add_argument(
+        '--recover', action='store_true',
+        help="print the surviving records of a store whose recorded size is zero, the "
+             "state left behind by a clear or a failed CRC; silent for any other store")
+    dump_parser.add_argument(
         '--aes256', action='store_true',
         help='the store was created with AES-256; the MMKV default is AES-128')
     args = parser.parse_args(argv)
@@ -114,7 +123,8 @@ def main(argv=None):
             return 2
 
     try:
-        dump(args.store, live=args.live, key=key, aes256=args.aes256)
+        dump(args.store, live=args.live, key=key, aes256=args.aes256,
+             recover=args.recover)
         # Flush here so a closed pipe surfaces inside this handler rather than
         # in the flush Python runs at exit, which cannot be caught.
         sys.stdout.flush()

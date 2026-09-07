@@ -215,6 +215,24 @@ class DumpCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
 
+    def test_recover_prints_a_reset_store_and_the_default_prints_nothing(self):
+        """A cleared store dumps empty by default and yields its records with --recover."""
+        payload = bytearray(_store(
+            _entry('channel', _string_value('googleplay')),
+            _entry('count', _varint(7)),
+        ))
+        struct.pack_into('<I', payload, 0, 0)
+        path = self._write(bytes(payload))
+
+        plain = self._run('dump', path)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertEqual(plain.stdout, '')
+
+        recovered = self._run('dump', '--recover', path)
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(recovered.stdout.splitlines(),
+                         ["0\t'channel'\t'googleplay'", "1\t'count'\t7"])
+
     def test_closed_pipe_is_not_reported_as_a_store_error(self):
         """`dump big-store | head -1` must exit quietly: no message, no traceback."""
         path = self._write(_store(*(

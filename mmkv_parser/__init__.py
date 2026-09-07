@@ -49,6 +49,19 @@ value fits inside the file, and falls back to the header otherwise. Measured on 
 stores from 55 iOS and Android extractions, the two agreed on every one, so the
 preference changes nothing on stores written by any release to date.
 
+**A recorded size of zero does not mean the records are gone.** When MMKV clears a
+store, and when it loads one whose CRC does not check out, it writes a size of zero
+into the meta file and leaves the data region untouched: ``MMKV::clearAll`` truncates
+to the expected capacity and calls ``writeActualSize(0, 0, ...)``, and the load path's
+"file not valid or empty, discard everything" branch does the same. Neither zeroes the
+records. Such a store reads as empty, which is what the app sees and what this module
+returns by default. ``recover=True`` walks the region anyway, and returns entries only
+when the walk consumes whole entries and then meets nothing but the zero padding, so a
+region that does not account for itself is left alone rather than guessed at. This is a
+walk of the ordinary layout, not a search: no offset is scanned and no record is
+inferred. Measured on 16 such stores from one iOS extraction, every one walked to clean
+padding, recovering 1 to 46 entries each.
+
 **Decryption is opt-in and needs the key.** MMKV supports an AES-CFB mode; the
 initialisation vector for it is kept in the meta file at bytes 12 to 28, and the key
 is not in either file. With no ``key`` argument an encrypted store raises MMKVError
@@ -99,7 +112,7 @@ def _read_varint(data, offset):
     raise MMKVError('varint longer than 5 bytes')
 
 
-def read_entries(path, key=None, aes256=False):
+def read_entries(path, key=None, aes256=False, recover=False):
     """Return every (key, raw_value_container) entry in file order.
 
     Every entry is returned, including repeats of the same key. Later entries
@@ -110,9 +123,15 @@ def read_entries(path, key=None, aes256=False):
     that is not encrypted. ``aes256`` selects AES-256 for a store the application
     created that way; the MMKV default is AES-128 and so is this one.
 
+    ``recover`` applies only to a store whose recorded size is zero, the state MMKV
+    leaves behind when it clears a store or fails a store's CRC. It walks the
+    surviving region and returns what it finds, and returns nothing when the region
+    does not walk cleanly to its zero padding. It changes nothing for any other store.
+
     Raises MMKVError for a file that is not a readable MMKV store, for an
-    encrypted store with no key, for a key that does not decrypt the store, and
-    for an encrypted store when no crypto backend is installed.
+    encrypted store with no key, for a key that does not decrypt the store, for an
+    encrypted store when no crypto backend is installed, and for a recover of a
+    reset store that is encrypted.
     """
     with open(path, 'rb') as handle:
         data = handle.read()
@@ -121,7 +140,14 @@ def read_entries(path, key=None, aes256=False):
     meta = _read_meta(path)
     region_size = _region_size(data, meta)
     if region_size == 0:
-        return []
+        if not recover:
+            return []
+        if meta and meta['vector']:
+            raise MMKVError(
+                'cannot recover a reset store that is encrypted: the meta file holds the '
+                'vector written when the store was reset, not the one the surviving region '
+                'was written under')
+        return _recover_reset_region(data)
     if _HEADER_LENGTH + region_size > len(data):
         raise MMKVError('recorded data size runs past the end of the file')
     region = data[_HEADER_LENGTH:_HEADER_LENGTH + region_size]
@@ -171,6 +197,24 @@ def _walk(region):
         except (MMKVError, UnicodeDecodeError):
             break
     return entries, end - offset
+
+
+def _recover_reset_region(data):
+    """Return the entries of a store whose recorded size is zero but whose region survives.
+
+    Only returned when the walk accounts for the whole region: whole entries followed by
+    nothing but the zero padding MMKV pads the file out to. A region carrying anything
+    else is the leftover of a rewrite rather than an intact abandoned store, and reading
+    it needs the record-by-record tests of a carve, not this walk, so nothing is returned
+    for it here.
+    """
+    body = data[_HEADER_LENGTH:]
+    if not any(body):
+        return []
+    entries, unread = _walk(body)
+    if not entries or any(body[len(body) - unread:]):
+        return []
+    return entries
 
 
 def _read_meta(path):
@@ -289,14 +333,14 @@ def decode_value(container):
     return container
 
 
-def read_dict(path, key=None, aes256=False):
+def read_dict(path, key=None, aes256=False, recover=False):
     """Return {key: decoded value} using the last occurrence of each key.
 
     Removed keys are omitted. Use read_entries when the superseded values
-    matter. ``key`` and ``aes256`` are passed through to read_entries.
+    matter. ``key``, ``aes256`` and ``recover`` are passed through to read_entries.
     """
     result = {}
-    for entry_key, container in read_entries(path, key=key, aes256=aes256):
+    for entry_key, container in read_entries(path, key=key, aes256=aes256, recover=recover):
         value = decode_value(container)
         if value is None:
             result.pop(entry_key, None)

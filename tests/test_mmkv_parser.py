@@ -165,6 +165,41 @@ class MMKVParserTest(unittest.TestCase):
     def test_empty_store_reads_as_no_entries(self):
         self.assertEqual(read_entries(self._write(struct.pack('<I', 0))), [])
 
+    def test_a_reset_store_keeps_its_records_and_recover_reads_them(self):
+        """A cleared or CRC-failed store keeps its region; MMKV only zeroes the size."""
+        payload = bytearray(_store(
+            _entry('channel', _string_value('googleplay')),
+            _entry('count', _varint(7)),
+        ))
+        struct.pack_into('<I', payload, 0, 0)          # what clearAll and a failed CRC leave
+        path = self._write(bytes(payload))
+        self.assertEqual(read_entries(path), [])       # default is unchanged: the app sees nothing
+        self.assertEqual(read_dict(path, recover=True),
+                         {'channel': 'googleplay', 'count': 7})
+
+    def test_recover_returns_nothing_when_the_region_does_not_account_for_itself(self):
+        """Leftovers of a rewrite need a carve, not this walk, so nothing is claimed."""
+        payload = bytearray(_store(_entry('channel', _string_value('googleplay'))))
+        struct.pack_into('<I', payload, 0, 0)
+        payload[-8:] = b'\x91\x44\x2c\x77\x03\xd1\x60\x1a'   # non-zero tail past the entries
+        self.assertEqual(read_entries(self._write(bytes(payload)), recover=True), [])
+
+    def test_recover_on_a_genuinely_empty_store_returns_nothing(self):
+        self.assertEqual(
+            read_entries(self._write(struct.pack('<I', 0) + b'\x00' * 64), recover=True), [])
+
+    def test_recover_changes_nothing_for_a_store_with_a_recorded_size(self):
+        path = self._write(_store(_entry('channel', _string_value('googleplay'))))
+        self.assertEqual(read_entries(path, recover=True), read_entries(path))
+
+    def test_recover_refuses_a_reset_store_that_is_encrypted(self):
+        """The meta holds the vector written at the reset, not the region's own."""
+        payload = bytearray(_store(_entry('a', _string_value('b'))))
+        struct.pack_into('<I', payload, 0, 0)
+        crc = b'\x00' * 12 + b'\x11' * 16 + b'\x00' * 4
+        with self.assertRaises(MMKVError):
+            read_entries(self._write(bytes(payload), crc=crc), recover=True)
+
     def test_encrypted_store_is_refused_rather_than_returning_garbage(self):
         """A non-zero AES vector in the .crc meta file means the region is ciphertext."""
         payload = _store(_entry('a', _string_value('b')))
