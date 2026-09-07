@@ -23,6 +23,11 @@ up in extractions, most often under the library's default instance name
   store, and failing its CRC on load, both write a size of zero into the meta
   file and leave the records in place, so the store reads as empty while its
   contents are still on disk. `recover=True` walks the surviving region.
+- Records carved out of the space past the recorded data region, through a
+  separate call. A compaction moves the surviving entries to the front and
+  lowers the recorded size without zeroing what it leaves behind, so earlier
+  generations of the store stay in the file. These are inferences, not parsed
+  records; see below.
 - The two encodings that can be told apart from the bytes alone. A container
   that is exactly a length prefix followed by that many bytes is how MMKV
   writes a string; anything else is read as a varint scalar, which covers the
@@ -43,6 +48,9 @@ up in extractions, most often under the library's default instance name
   returns nothing unless the walk consumes whole entries and then meets nothing
   but the file's zero padding. It scans no offsets and infers no records, so a
   region holding the leftovers of a rewrite is left alone rather than guessed at.
+- Let carved records reach the ordinary reads. `carve_slack` is a separate
+  call, `read_entries` and `read_dict` never invoke it, and every carved record
+  carries its file offset and whether its key also exists live.
 - Type values. MMKV records a value's type in the calling code, not in the
   file. One consequence worth knowing: the empty string, the integer 0 and
   `false` are all the single byte `00`, and `decode_value` returns `''` for it.
@@ -224,6 +232,49 @@ they account for the whole of it, ending in the zero padding. Measured on 16 suc
 stores from one iOS extraction, every one walked to clean padding, recovering 1 to
 46 entries each, 126 in total; on the same extraction the default output of all 94
 stores was unchanged.
+## Carving the space past the recorded region
+
+MMKV compacts a store by moving the surviving entries to the front of the region
+with a memmove and lowering the recorded size (`memmoveDictionary` and
+`doFullWriteBack` in `MMKV_IO.cpp`). Nothing zeroes what the move leaves behind,
+and growth is the only operation that zero-fills (`MemoryFile.cpp`), so the bytes
+between the recorded size and the end of the file are earlier generations of this
+store and never another file's. Across 1,840 stores from 78 extractions, 290 of
+the 1,710 unencrypted ones carried something other than zeros there.
+
+`carve_slack(path)` returns a `CarvedRecord` per hit: the offset in the file, the
+key, the raw container, and whether the key also exists in the live region.
+
+**They are inferences and some are wrong.** A compaction overwrites the front of
+the space, so the first surviving record rarely begins where the space does and
+the records are not contiguous. There is no marker to synchronise on, so every
+offset is tested on its own. A record is accepted when its key length is 5 to 64
+bytes, the key decodes as UTF-8 and matches `[0-9\w\-\$\./:]+`, and its value
+container either begins with a length that accounts for the rest of it, is a bare
+varint, or is the 4 or 8 bytes MMKV writes a float and a double as.
+
+Measured against data holding no MMKV structure at all: zero false records per KiB
+on zero-filled, random, natural-language and JSON input, and about 1.2 per KiB on
+base64 and hex text, which nothing here rules out. A store whose values are encoded
+blobs will carve dirty.
+
+The space is excluded from the key character set deliberately, and it is what keeps
+text out. A space is byte 0x20, which is 32, so in running text it serves as a
+key-length field and the 32 bytes after it read as a key: a space-permitting version
+of the same test produced 2,469 false records on a megabyte of prose, every one of
+them with a space in its key, while only 25 of 91,462 real keys measured across four
+extractions contain one. The 5-to-64 window gives up the 1.4% of real keys shorter
+than 5 bytes and the 2.0% longer than 64; widening it was measured and rejected,
+because it tripled the false positives on base64.
+
+The signal that separates a real carve from a false one is repetition. A real
+carved record repeats a key, because that is what a superseded write is, and its
+key overlaps the live set; the false ones are each unique and match nothing live.
+`live_key` carries that per record.
+
+Encrypted stores are refused. Their space is ciphertext written under an earlier
+vector, and while AES-CFB resynchronises after one block, so a key would recover it
+past the first 16 bytes, that is not implemented here.
 
 ## Vendoring into the LEAPP cores
 
