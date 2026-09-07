@@ -36,11 +36,13 @@ up in extractions, most often under the library's default instance name
 
 ## What it does not do
 
-- Look for a key. Decryption happens only when you pass one. A store whose
-  `.crc` meta file carries a non-zero AES vector and no key is refused with
-  `MMKVError` instead of being walked, because walking ciphertext returns
-  garbage keys that look like data. A key that does not decrypt the store is
-  refused the same way rather than returning a partial garbage read.
+- Look for a key. Decryption happens only when you pass one. A store whose data
+  region does not read as plaintext records, and whose `.crc` meta file carries an
+  AES vector, is refused with `MMKVError` instead of being walked, because walking
+  ciphertext returns garbage keys that look like data. A key that does not decrypt
+  the store is refused the same way rather than returning a partial garbage read.
+  The vector on its own is not the test: `clearAll` writes one for plaintext stores
+  too, so a store that reads is read.
 - Verify the CRC. The meta file records one over the data region as stored, so
   it validates the file rather than the key; the format section gives the field
   for an examiner who wants to check it.
@@ -188,7 +190,7 @@ layout is the struct's ([MMKVMetaInfo.hpp](https://github.com/Tencent/MMKV/blob/
     [0:4]    crc, uint32 LE      CRC-32 of the data region (actual_size bytes from offset 4)
     [4:8]    version, uint32 LE  which of the fields below are meaningful
     [8:12]   sequence, uint32 LE full write-back count
-    [12:28]  aesVector[16]       non-zero when the data region is AES-encrypted
+    [12:28]  aesVector[16]       the AES initialisation vector. NOT an encryption flag
     [28:32]  actualSize, uint32  the data region length, from version 3
 
 The version enum is at [MMKVMetaInfo.hpp](https://github.com/Tencent/MMKV/blob/ad7657ef9d120dbcdd7432d75aa6c59391149b22/Core/MMKVMetaInfo.hpp#L31-L44): 1 adds the
@@ -205,12 +207,28 @@ compute it; the field is documented here so an examiner can.
 
 **Encryption.** MMKV encrypts with AES CFB-128 or CFB-256, chosen over CBC
 because the store is append-only ([FAQ wiki](https://github.com/Tencent/MMKV/wiki/FAQ/f008c42c66eaf99c618c91ab5b74396de8f01159)); the IV lives in the
-meta file ([MMKVPredef.h](https://github.com/Tencent/MMKV/blob/ad7657ef9d120dbcdd7432d75aa6c59391149b22/Core/MMKVPredef.h#L265) for the length). A non-zero vector at
-bytes 12 to 28 is how the reader recognises an encrypted store. The key is in
+meta file ([MMKVPredef.h](https://github.com/Tencent/MMKV/blob/ad7657ef9d120dbcdd7432d75aa6c59391149b22/Core/MMKVPredef.h#L265) for the length). The key is in
 neither file, so it has to be supplied; it is then taken the way `AESCrypt` takes
 it, truncated to sixteen bytes for AES-128 or thirty-two for AES-256 and
 zero-padded if shorter, which means two keys sharing their first sixteen bytes
 are one key.
+
+**The vector at bytes 12 to 28 does not mean the store is encrypted.** Encryption
+writes it, and so does `MMKV::clearAll`, which fills it with random bytes for every
+store it clears and only then checks whether there is a crypter to reset
+([MMKV_IO.cpp](https://github.com/Tencent/MMKV/blob/c74d8b886abd87132c507ec17865a7fb4feb9679/Core/MMKV_IO.cpp#L1476-L1481)).
+Nothing anywhere zeroes the field again, so a plaintext store that has ever been
+cleared carries a vector for the rest of its life, and so does one that was
+decrypted back to plaintext with `reKey("")`
+([MMKV_IO.cpp](https://github.com/Tencent/MMKV/blob/c74d8b886abd87132c507ec17865a7fb4feb9679/Core/MMKV_IO.cpp#L1364-L1375)).
+That block is unchanged in every release from v1.2.10 to v2.2.2, checked tag by tag.
+
+So this reader decides by reading the region, not by the field. A region whose
+records account for every byte of the recorded size is plaintext and is returned as
+such, whatever the vector holds. The field is used for what it is: the IV handed to
+the cipher once a key is supplied. Earlier versions of this reader refused any store
+with a non-zero vector, which silently refused readable plaintext stores; a WeChat
+`_slots_id_2` from a live device was the counterexample that established it.
 
 **How a wrong key is caught.** The CRC in the meta file is computed over the data
 region as stored, so it validates the file without saying anything about the key.
